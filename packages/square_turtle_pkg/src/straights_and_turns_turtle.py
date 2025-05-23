@@ -76,7 +76,6 @@ class TurtlesimStraightsAndTurns:
 
     def timer_callback(self, event):
         twist = Twist()
-  ///........................./.''
         if self.dist_goal_active:
             moved = abs(self.last_distance - self.start_distance)
             if moved < abs(self.goal_distance):
