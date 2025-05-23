@@ -1,68 +1,95 @@
 #!/usr/bin/env python3
 
 import rospy
-from duckietown_msgs.msg import Twist2DStamped
-from duckietown_msgs.msg import FSMState
-from duckietown_msgs.msg import AprilTagDetectionArray
+from duckietown_msgs.msg import Twist2DStamped, AprilTagDetectionArray
 
-class Target_Follower:
+class TargetFollower:
     def __init__(self):
-        
-        #Initialize ROS node
-        rospy.init_node('target_follower_node', anonymous=True)
-
-        # When shutdown signal is received, we run clean_shutdown function
+        rospy.init_node('target_follower_node', anonymous=False)
         rospy.on_shutdown(self.clean_shutdown)
-        
-        ###### Init Pub/Subs. REMEMBER TO REPLACE "akandb" WITH YOUR ROBOT'S NAME #####
-        self.cmd_vel_pub = rospy.Publisher('/akandb/car_cmd_switch_node/cmd', Twist2DStamped, queue_size=1)
-        rospy.Subscriber('/akandb/apriltag_detector_node/detections', AprilTagDetectionArray, self.tag_callback, queue_size=1)
-        ################################################################
 
-        rospy.spin() # Spin forever but listen to message callbacks
+        # Get robot name from launch namespace
+        self.robot_name = rospy.get_namespace().strip('/')
 
-    # Apriltag Detection Callback
+        # Publisher for movement commands
+        self.cmd_pub = rospy.Publisher(
+            f'/{self.robot_name}/car_cmd_switch_node/cmd',
+            Twist2DStamped, queue_size=1
+        )
+
+        # Subscriber for AprilTag detections
+        rospy.Subscriber(
+            f'/{self.robot_name}/apriltag_detector_node/detections',
+            AprilTagDetectionArray,
+            self.tag_callback,
+            queue_size=1
+        )
+
+        # Internal variables
+        self.no_detection_counter = 0
+        self.detection_threshold = 5  # number of empty frames before seeking
+        self.cmd = Twist2DStamped()
+        self.rate = rospy.Rate(10)  # 10 Hz
+
+        rospy.loginfo(" TargetFollower started for robot: /%s", self.robot_name)
+        rospy.spin()
+
     def tag_callback(self, msg):
-        self.move_robot(msg.detections)
- 
-    # Stop Robot before node has shut down. This ensures the robot keep moving with the latest velocity command
-    def clean_shutdown(self):
-        rospy.loginfo("System shutting down. Stopping robot...")
-        self.stop_robot()
-
-    # Sends zero velocity to stop the robot
-    def stop_robot(self):
-        cmd_msg = Twist2DStamped()
-        cmd_msg.header.stamp = rospy.Time.now()
-        cmd_msg.v = 0.0
-        cmd_msg.omega = 0.0
-        self.cmd_vel_pub.publish(cmd_msg)
-
-    def move_robot(self, detections):
-
-        #### YOUR CODE GOES HERE ####
-
-        if len(detections) == 0:
+        # No detections? Keep seeking
+        if len(msg.detections) == 0:
+            self.no_detection_counter += 1
+            rospy.loginfo("No tag seen. Seeking... (%d)", self.no_detection_counter)
+            if self.no_detection_counter >= self.detection_threshold:
+                self.seek_object()
             return
 
-        x = detections[0].transform.translation.x
-        y = detections[0].transform.translation.y
-        z = detections[0].transform.translation.z
+        # Tag detected → reset seeking counter
+        self.no_detection_counter = 0
 
-        rospy.loginfo("x,y,z: %f %f %f", x, y, z)
+        # Use the first tag detected
+        tag = msg.detections[0]
+        x_offset = tag.transform.translation.x
 
+        rospy.loginfo(f"Tag detected - x offset: {x_offset:.3f}")
+        self.look_at_object(x_offset)
 
-        # Publish a velocity
-        cmd_msg = Twist2DStamped()
-        cmd_msg.header.stamp = rospy.Time.now()
-        cmd_msg.v = 0.0
-        cmd_msg.omega = 0.0
-        self.cmd_vel_pub.publish(cmd_msg)
+    def seek_object(self):
+        # Rotate in place to find a tag
+        self.cmd.v = 0.0
+        self.cmd.omega = 1.0  # constant spin
+        self.cmd_pub.publish(self.cmd)
+        self.rate.sleep()
 
-        #############################
+    def look_at_object(self, x_offset):
+        gain = 1.0
+        min_omega = 0.5
+        max_omega = 2.0
+
+        # Dead zone to stop jitter if tag is nearly centered
+        if abs(x_offset) < 0.05:
+            omega = 0.0
+            rospy.loginfo("Tag centered — stopping rotation.")
+        else:
+            omega = -gain * x_offset
+
+            # Clamp values
+            if abs(omega) < min_omega:
+                omega = min_omega if omega > 0 else -min_omega
+            omega = max(-max_omega, min(max_omega, omega))
+
+        self.cmd.v = 0.0
+        self.cmd.omega = omega
+        self.cmd_pub.publish(self.cmd)
+        self.rate.sleep()
+
+    def clean_shutdown(self):
+        rospy.loginfo("Shutdown: stopping robot.")
+        self.cmd.v = 0.0
+        self.cmd.omega = 0.0
+        self.cmd_pub.publish(self.cmd)
 
 if __name__ == '__main__':
     try:
-        target_follower = Target_Follower()
+        TargetFollower()
     except rospy.ROSInterruptException:
         pass
